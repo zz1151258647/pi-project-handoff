@@ -28,6 +28,7 @@ const NM = findPiNodeModules();
 const extPath = process.argv[2] || path.join(__dirname, "..", "extensions", "project-handoff.ts");
 // 隔离测试状态目录，不影响真实状态
 process.env.PI_CODING_AGENT_DIR = path.join(os.tmpdir(), "ph-test-agent");
+fs.rmSync(process.env.PI_CODING_AGENT_DIR, { recursive: true, force: true });
 const { createJiti } = require(NM + "/jiti");
 
 function assert(cond, label) {
@@ -49,11 +50,14 @@ function assert(cond, label) {
 	const factory = await jiti.import(extPath, { default: true });
 
 	const handlers = {};
-	let tool, command;
+	const commands = {};
+	const sentMessages = [];
+	let tool;
 	factory({
 		on: (ev, h) => (handlers[ev] = h),
 		registerTool: (t) => (tool = t),
-		registerCommand: (n, o) => (command = { name: n, ...o }),
+		registerCommand: (n, o) => (commands[n] = o),
+		sendUserMessage: (text, options) => sentMessages.push({ text, options }),
 	});
 
 	let fakeUsage = undefined;
@@ -67,13 +71,24 @@ function assert(cond, label) {
 			context: { contextMessages: [{ role: "assistant", content: [{ type: "text", text }] }] },
 		}, fakeCtx);
 
+	let r;
 	console.log("1) 会话启动与压缩计数");
 	handlers["session_start"]({ type: "session_start" }, fakeCtx);
+	r = handlers["before_agent_start"]({}, fakeCtx);
+	assert(r === undefined, "无检查点时不注入交接消息，避免干扰普通提示与直接 /skill 调用");
+	commands["handoff"].handler("检查 补充检查要求", fakeCtx);
+	assert(sentMessages.length === 1 && sentMessages[0].text.includes("/skill:project-handoff"), "handoff 检查显式调用 project-handoff skill");
+	assert(sentMessages[0].text.includes("不保存") && sentMessages[0].text.includes("补充检查要求"), "handoff 检查仅评估并保留用户补充要求");
+	commands["handoff"].handler("交接", fakeCtx);
+	assert(sentMessages.length === 2 && sentMessages[1].text.includes("保存当前进度"), "handoff 交接触发材料保存流程");
+	commands["handoff"].handler("接续", fakeCtx);
+	assert(sentMessages.length === 3 && sentMessages[2].text.includes("恢复上次任务"), "handoff 接续自动触发恢复流程");
+	assert(!sentMessages[2].text.includes("/skill:") || sentMessages[2].text.length < 400, "接续不需要用户手写长提示词");
 	handlers["session_compact"]({ reason: "threshold" }, fakeCtx);
 	handlers["session_compact"]({ reason: "overflow" }, fakeCtx);
 	handlers["session_compact"]({ reason: "manual" }, fakeCtx); // 手动不计
 	handlers["session_compact"]({ reason: "threshold" }, fakeCtx);
-	let r = handlers["before_agent_start"]({}, fakeCtx);
+	r = handlers["before_agent_start"]({}, fakeCtx);
 	assert(r.message.customType === "project_handoff_state", "注入状态消息");
 	assert(r.message.content.includes("自动压缩 3 次"), "计数为 3（manual 不计）");
 	assert(r.message.content.includes("已到压缩检查点"), "第 3 次标记待评估");
@@ -118,7 +133,10 @@ function assert(cond, label) {
 	assert(res.details.state.proposal === null && res.details.state.cooldownUntil === 6, "回应 continue 归档建议并保持冷却");
 	await tool.execute("t7", { action: "mute" }, undefined, undefined, fakeCtx);
 	res = await tool.execute("t8", { action: "prepare", reason: "count", notice: "交接建议：" + "丁".repeat(30), safe: true, has_next: true }, undefined, undefined, fakeCtx);
-	assert(res.isError === true, "静默中拒绝提醒");
+	assert(res.isError === true, "静默中拒绝自动提醒");
+	res = await tool.execute("t8b", { action: "prepare", reason: "manual", notice: "交接建议：" + "主动检查确认存在切换收益和明确后续", safe: true, has_next: true }, undefined, undefined, fakeCtx);
+	assert(res.details.prepared === true, "用户主动检查可在静默状态下登记建议");
+	await tool.execute("t8c", { action: "cancel", proposal_id: res.details.proposal_id }, undefined, undefined, fakeCtx);
 	await tool.execute("t9", { action: "resume" }, undefined, undefined, fakeCtx);
 
 	console.log("7) notice 格式校验");
@@ -130,7 +148,7 @@ function assert(cond, label) {
 	console.log("8) 规模软检查点（1M 窗口阈值 500k）");
 	fakeUsage = { tokens: 480000, contextWindow: 1000000, percent: 48 };
 	r = handlers["before_agent_start"]({}, fakeCtx);
-	assert(!r.message.content.includes("规模已到检查点"), "480k 未到阈值不标记");
+	assert(!r || !r.message.content.includes("规模已到检查点"), "480k 未到阈值不标记");
 	fakeUsage = { tokens: 520000, contextWindow: 1000000, percent: 52 };
 	r = handlers["before_agent_start"]({}, fakeCtx);
 	assert(r.message.content.includes("上下文规模已到检查点"), "520k 触发规模检查点");
@@ -138,7 +156,7 @@ function assert(cond, label) {
 	assert(res.details.prepared === true, "规模信号下允许 count 兜底提醒");
 	await tool.execute("t13", { action: "cancel", proposal_id: res.details.proposal_id }, undefined, undefined, fakeCtx);
 	r = handlers["before_agent_start"]({}, fakeCtx);
-	assert(!r.message.content.includes("规模已到检查点"), "同规模不重复触发（1.5x 规则）");
+	assert(!r || !r.message.content.includes("规模已到检查点"), "同规模不重复触发（1.5x 规则）");
 	fakeUsage = { tokens: 800000, contextWindow: 1000000, percent: 80 };
 	r = handlers["before_agent_start"]({}, fakeCtx);
 	assert(r.message.content.includes("上下文规模已到检查点"), "再涨 50% 后再次触发");

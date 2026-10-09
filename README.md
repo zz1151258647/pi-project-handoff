@@ -27,21 +27,20 @@ pi install git:github.com/zz1151258647/pi-project-handoff
 2. `extensions/project-handoff.ts` 拷到 `<agent-dir>/extensions/`（自动发现）
 3. `/reload` 或重启 pi
 
-验证：`/handoff-state` 能弹出状态面板即扩展已加载；skill 会出现在启动时的可用 skill 列表。
+验证：`/handoff` 能触发交接操作即扩展已加载；skill 会出现在启动时的可用 skill 列表。
 
 ## 使用
 
 | 入口 | 效果 |
 |---|---|
-| `/handoff` | 一键交接：整理材料写入 `PROJECT_STATE.md`，交付接续开场白 |
-| `/handoff 只评估要不要交接，先不保存` | 命令可带自由指令 |
+| `/handoff 交接` | 保存交接材料并交付接续开场白 |
+| `/handoff 接续` | 从当前项目交接材料恢复上次任务，先核对再继续已授权事项 |
+| `/handoff 检查` | 主动评估是否值得交接，只评估和登记，不保存材料 |
 | "保存一下进度" / "整理交接材料" | 同 `/handoff` |
 | `/skill:project-handoff <指令>` | 显式加载 skill 并带指令 |
-| `/handoff-state` | 查看压缩计数、规模检查点、待办 |
-| `/handoff-state mute` / `resume` / `reset` | 静默 / 恢复 / 重置提醒 |
 | "读 PROJECT_STATE.md 继续上次" | 新会话恢复（也可粘贴开场白） |
 
-接续流程：`/handoff` → 拿到材料路径和开场白 → 在项目目录开新 pi 会话 → 粘贴开场白 → 新会话核对后继续。
+接续流程：在新会话的项目目录执行 `/handoff 接续`；技能会定位当前项目既定的交接状态材料，先只读核对，再继续其中已授权的下一步。若材料不在默认位置，补充指定文件路径即可。
 
 ## 触发提醒的信号
 
@@ -69,7 +68,7 @@ pi install git:github.com/zz1151258647/pi-project-handoff
 │       └── assets/
 │           └── PROJECT_STATE.template.md
 └── tests/
-    └── simulate.test.js         # 提醒链模拟测试（25 项断言）
+    └── simulate.test.js         # 提醒链模拟测试（33 项断言）
 ```
 
 ## 测试
@@ -82,7 +81,7 @@ node tests/simulate.test.js
 
 ## 验证证据层级
 
-报告问题时请分开说明：文件存在、扩展加载、`/handoff-state` 可用、真实会话计数变化、最终答复核验通过——这五层是不同的证据。扩展未加载或事件未触发时程序不保证提醒发生。
+报告问题时请分开说明：文件存在、扩展加载、`/handoff` 可用、真实会话计数变化、最终答复核验通过——这五层是不同的证据。扩展未加载或事件未触发时程序不保证提醒发生。
 
 ## 卸载
 

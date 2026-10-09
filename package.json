@@ -1,6 +1,6 @@
 {
   "name": "pi-project-handoff",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "项目交接：长任务换会话时保存目标、决定、进度和下一步，附压缩/规模检查点的交接提醒计数扩展（pi 版 project-handoff）",
   "keywords": ["pi-package"],
   "license": "MIT",

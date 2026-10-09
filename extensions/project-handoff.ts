@@ -28,7 +28,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 interface HandoffProposal {
 	id: string;
 	notice: string;
-	reason: "count" | "stage" | "confusion" | "checkpoint";
+	reason: "count" | "stage" | "confusion" | "checkpoint" | "manual";
 	compactionCount: number;
 	stageKey?: string;
 	benefit?: string;
@@ -211,9 +211,6 @@ function injectedStatusText(state: HandoffState): string {
 			`⚠️ ${why}：请评估是否建议交接——阶段边界（刚完成一个可验收阶段、进入下一大段工作）优先于次数，并用 handoff_state 工具登记结果（evaluate defer/skip 或 prepare 提出建议）。评估结果必须登记，不能省略。`,
 		);
 	}
-	lines.push(
-		"阶段自查：若刚完成一个可验收阶段、准备进入下一大段工作，或发现已核实的目标/版本混淆，无论压缩几次都按 project-handoff skill 评估并登记（stage/confusion 不受冷却约束）。",
-	);
 	if (state.proposal && !state.proposal.verified) {
 		lines.push(
 			"⚠️ 有一条已登记但未展示的交接建议：本轮最终答复正文第一段必须原样以「交接建议：」开头展示：" +
@@ -302,6 +299,9 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 		}
+		// 空闲时不向每次用户请求注入交接内容：这会反复激活 project-handoff skill，
+		// 并可能抢占用户明确指定的 /skill 调用。只在真实检查点或有待展示建议时注入。
+		if (!s.pendingEval && (!s.proposal || s.proposal.verified)) return;
 		return {
 			message: {
 				customType: "project_handoff_state",
@@ -396,8 +396,9 @@ export default function (pi: ExtensionAPI) {
 					Type.Literal("stage"),
 					Type.Literal("confusion"),
 					Type.Literal("checkpoint"),
+					Type.Literal("manual"),
 				],
-				{ description: "prepare 的触发原因" },
+				{ description: "prepare 的触发原因：count/stage/confusion/checkpoint，或用户主动检查时的 manual" },
 			),
 		),
 		notice: Type.Optional(
@@ -422,7 +423,7 @@ export default function (pi: ExtensionAPI) {
 		outcome?: "defer" | "skip";
 		note?: string;
 		next_check?: "next_turn" | "next_compaction";
-		reason?: "count" | "stage" | "confusion" | "checkpoint";
+		reason?: "count" | "stage" | "confusion" | "checkpoint" | "manual";
 		notice?: string;
 		stage_key?: string;
 		benefit?: string;
@@ -487,7 +488,7 @@ export default function (pi: ExtensionAPI) {
 
 				case "prepare": {
 					const reason = params.reason ?? "count";
-					if (s.muted) return fail("已静默，不提出建议；用户显式请求交接时可直接执行保存", { action: "prepare" });
+					if (s.muted && reason !== "manual") return fail("已静默，不提出主动提醒；用户显式请求检查时允许登记建议", { action: "prepare" });
 					if (!params.notice) return fail("prepare 需要 notice", { action: "prepare" });
 					const noticeError = validateNotice(params.notice);
 					if (noticeError) return fail(noticeError, { action: "prepare" });
@@ -504,7 +505,7 @@ export default function (pi: ExtensionAPI) {
 						return fail("reason=checkpoint 需要 checkpoint_key", { action: "prepare" });
 					}
 					// 信号校验：count 是兜底提醒，需压缩到冷却点或有规模检查点信号；
-					// stage/confusion/checkpoint 是阶段/混淆/节点提醒，不受冷却约束。
+					// stage/confusion/checkpoint 是阶段/混淆/节点提醒；manual 由用户主动触发，均不受冷却约束。
 					if (reason === "count") {
 						const compactionDue = s.autoCompactions >= s.cooldownUntil;
 						const sizeSignal = s.pendingEval === true && s.pendingEvalReason === "size";
@@ -609,48 +610,27 @@ export default function (pi: ExtensionAPI) {
 	// ---- 用户命令：主动触发与状态管理 ----
 
 	pi.registerCommand("handoff", {
-		description: "立即执行项目交接：保存交接材料并交付接续开场白（可附加自由指令，如“只评估不保存”）",
+		description: "项目交接：交接 / 接续 / 检查；不带参数时按“交接”处理",
 		handler: (args, ctx) => {
-			const extra = args.trim();
-			pi.sendUserMessage(
-				`/skill:project-handoff 保存当前进度并交付接续开场白。${extra ? `附加要求：${extra}` : ""}`,
-				{ expandPromptTemplates: true },
+			const input = args.trim();
+			const match = input.match(/^(交接|接续|检查)(?:\s+([\s\S]*))?$/);
+			const action = match?.[1] ?? "交接";
+			const extra = match?.[2]?.trim() ?? (match ? "" : input);
+			const isCheck = action === "检查";
+			const instruction = action === "接续"
+				? `从当前项目既定的交接状态材料恢复上次任务，先只读核对，再继续其中已授权的下一步；不要重复保存交接材料或新建接续材料。缺少状态材料或关键授权不明时先说明阻塞。${extra ? `补充要求：${extra}` : ""}`
+				: isCheck
+					? `主动检查当前是否值得建议交接。只评估并按规则登记结果，不保存或更新 PROJECT_STATE.md，不创建接续开场白；若确有切换收益且后续明确，可提出交接建议（reason=manual）。${extra ? `补充要求：${extra}` : ""}`
+					: `保存当前进度并交付接续开场白。${extra ? `附加要求：${extra}` : ""}`;
+			pi.sendUserMessage(`/skill:project-handoff ${instruction}`, { expandPromptTemplates: true });
+			ctx.ui.notify(
+				isCheck
+					? "project-handoff：正在主动评估是否适合交接（不会保存材料）……"
+					: action === "接续"
+						? "project-handoff：正在恢复并核对上次交接……"
+						: "project-handoff：已发起交接，正在整理材料……",
+				"info",
 			);
-			ctx.ui.notify("project-handoff：已发起交接，正在整理材料……", "info");
-		},
-	});
-
-	pi.registerCommand("handoff-state", {
-		description: "查看 project-handoff 计数状态；参数 mute / resume / reset 可管理",
-		handler: async (args, ctx) => {
-			const s = ensureState(ctx);
-			const arg = args.trim().toLowerCase();
-			if (arg === "mute") {
-				s.muted = true;
-				s.pendingEval = false;
-				s.proposal = null;
-				saveState(s);
-				ctx.ui.notify("project-handoff：已静默，本任务不再主动提醒", "info");
-				return;
-			}
-			if (arg === "resume") {
-				s.muted = false;
-				s.cooldownUntil = s.autoCompactions + 3;
-				saveState(s);
-				ctx.ui.notify(`project-handoff：已恢复提醒，冷却至第 ${s.cooldownUntil} 次压缩`, "info");
-				return;
-			}
-			if (arg === "reset") {
-				state = defaultState(s.sessionId);
-				saveState(state);
-				ctx.ui.notify("project-handoff：计数状态已重置", "info");
-				return;
-			}
-			ctx.ui.notify(statusLine(s), "info");
-			if (s.pendingEval) ctx.ui.notify("已到交接检查点，等待评估登记", "warning");
-			if (s.proposal && !s.proposal.verified) {
-				ctx.ui.notify(`有未展示的建议（${s.proposal.id}）：${s.proposal.notice}`, "warning");
-			}
 		},
 	});
 }

@@ -9,7 +9,7 @@
 | 原 Hook 事件 | pi 扩展事件 | 行为 |
 | --- | --- | --- |
 | `PostCompact(auto)` | `session_compact`（`reason` 为 `threshold` 或 `overflow`） | 自动压缩数加一。手动 `/compact`、恢复会话、聊天轮数都不计数；同一回合可以发生多次自动压缩 |
-| `SessionStart`／`UserPromptSubmit` 注入 | `before_agent_start` | 每次用户 prompt 后注入一行 `[project-handoff 状态]` + 阶段自查提示；到期待评估或有未展示建议时附带待办 |
+| `SessionStart`／`UserPromptSubmit` 注入 | `before_agent_start` | 仅到期待评估或存在未展示建议时注入状态与待办，不在普通提示中持续唤起交接技能 |
 | （无对应 Hook，新增） | `before_agent_start` 中的规模软检查点 | 上下文 token 超过 max(50k, 窗口 50%)（1M 窗口约 500k）且距上次标记再涨约 50% 时标记待评估。这是 1M 上下文等“压缩几乎不触发”场景的程序化兜底信号，阈值可用 `PI_HANDOFF_SIZE_THRESHOLD` 覆盖 |
 | `Stop` 核验与补漏 | `agent_before_settle` | 核验最终答复正文第一段；缺评估登记或缺展示时请求补漏一次，每回合最多一次 |
 
@@ -19,7 +19,7 @@
 
 ## 登记动作
 
-登记用模型工具 `handoff_state`（`model-only`，由本 skill 流程调用）。用户侧命令：`/handoff` 一键发起交接（等价于 `/skill:project-handoff 保存当前进度并交付接续开场白`，可带附加指令如“只评估不保存”）；`/handoff-state [mute|resume|reset]` 查看或管理计数状态。动作一览：
+登记用模型工具 `handoff_state`（`model-only`，由本 skill 流程调用）。用户侧命令：`/handoff 交接` 保存并交付接续开场白；`/handoff 接续` 恢复当前项目的上次交接；`/handoff 检查` 主动评估但不保存材料。命令会自动调用 skill，用户无需再手写 `/skill` 和长提示词。动作一览：
 
 | 场景 | 参数 |
 | --- | --- |
@@ -27,6 +27,7 @@
 | 暂缓 | `action: "evaluate"`, `outcome: "defer"`, `note: "<具体缺项>"`, `next_check: "next_turn"`；同阶段没有新收益时改 `"next_compaction"` |
 | 不适用 | `action: "evaluate"`, `outcome: "skip"`, `note: "<纯问答、无后续或讨论本 Skill>"` |
 | 首次次数提醒 | `action: "prepare"`, `reason: "count"`, `safe: true`, `has_next: true`, `notice: "交接建议：<原因、第一步、确认后的动作>"` |
+| 用户主动检查 | `action: "prepare"`, `reason: "manual"`；只在用户执行 `/handoff 检查` 且评估确有切换收益时使用，不受自动提醒静默和冷却限制 |
 | 阶段提醒（一等信号） | 同上，`reason: "stage"`，加 `stage_key`、`benefit`；不受冷却约束 |
 | 已核实的新混淆 | 同上，`reason: "confusion"`，加 `cause_key`（已纠正问题的标识） |
 | 用户指定节点到达 | 同上，`reason: "checkpoint"`，加 `checkpoint_key` |
@@ -61,7 +62,7 @@ pi install git:github.com/zz1151258647/pi-project-handoff
 1. `skills/project-handoff/` 放到 `<agent-dir>/skills/`（默认 `~/.pi/agent/skills/`）。
 2. `extensions/project-handoff.ts` 放到 `<agent-dir>/extensions/`（自动发现）；或在 `<agent-dir>/settings.json` 的 `extensions` 数组中注册路径（相对 agent 目录或绝对路径均可）。
 3. 运行 `/reload` 或重启 pi 后生效。
-4. 验证分五个证据层级，报告时分开说：文件存在、扩展加载（真实会话出现注入消息）、`/handoff-state` 命令可用、真实会话计数变化、最终答复核验通过。
+4. 验证分五个证据层级，报告时分开说：文件存在、扩展加载（真实会话出现注入消息）、`/handoff` 命令可用、真实会话计数变化、最终答复核验通过。
 
-- 回退：`pi remove git:github.com/zz1151258647/pi-project-handoff`，或删除手动拷贝的文件、从 `extensions` 数组删除该条。状态目录保留。也可以用 `/handoff-state mute` 临时静默、`/handoff-state reset` 重置计数。
+- 回退：`pi remove git:github.com/zz1151258647/pi-project-handoff`，或删除手动拷贝的文件、从 `extensions` 数组删除该条。状态目录保留。提醒静默和计数重置可通过内部 `handoff_state` 工具管理。
 - skill 与配套扩展需一并安装：只复制 `SKILL.md` 不能替代扩展和说明。
